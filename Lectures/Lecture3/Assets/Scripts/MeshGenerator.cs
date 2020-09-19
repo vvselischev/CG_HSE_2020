@@ -6,9 +6,10 @@ using UnityEngine;
 [RequireComponent(typeof(MeshFilter))]
 public class MeshGenerator : MonoBehaviour
 {
+    public ComputeShader Generator;
     public MetaBallField Field = new MetaBallField();
 
-    private const int CubesCount = 40;
+    private const int CubesCount = 32;
     private const float Eps = 0.01f;
     
     private MeshFilter _filter;
@@ -49,8 +50,92 @@ public class MeshGenerator : MonoBehaviour
         var min = Math.Min(minX, Math.Min(minY, minZ)) - 1;
         var max = Math.Max(maxX, Math.Max(maxY, maxZ)) + 1;
 
-        var size = (max - min) / CubesCount;
+        vertices.Clear();
+        indices.Clear();
+        normals.Clear();
         
+        Field.Update();
+
+        //InitMeshDataCPU(min, max);
+        InitMeshDataGPU(min, max);
+
+        // Here unity automatically assumes that vertices are points and hence (x, y, z) will be represented as (x, y, z, 1) in homogenous coordinates
+        _mesh.Clear();
+        _mesh.SetVertices(vertices);
+        _mesh.SetTriangles(indices, 0);
+        _mesh.SetNormals(normals);
+        
+        // Upload mesh data to the GPU
+        _mesh.UploadMeshData(false);
+    }
+
+    // I tried two Vector3 arrays here with a sequential layout and marshalling (SizeConst = 3),
+    // but exceptions occurred about fields that are not bittable.
+    private struct Output
+    {
+        public Vector3 vertex1;
+        public Vector3 vertex2;
+        public Vector3 vertex3;
+        public Vector3 normal1;
+        public Vector3 normal2;
+        public Vector3 normal3;
+        public int hasValue;
+    }
+    
+    private void InitMeshDataGPU(float min, float max)
+    {
+        var size = (max - min) / CubesCount;
+        var totalCubesCount = CubesCount * CubesCount * CubesCount;
+        var maxVerticesCount = totalCubesCount * 5 * 3;
+        
+        var kernel = Generator.FindKernel("Generate");
+
+        var outputBuffer = new ComputeBuffer(maxVerticesCount, sizeof(float) * 18 + sizeof(int), ComputeBufferType.Append);
+        Generator.SetBuffer(kernel, "outputBuffer", outputBuffer);
+
+        Generator.SetInt("ballsCount", Field.Balls.Length);
+        var ballsBuffer = new ComputeBuffer(3, sizeof(float) * 3, ComputeBufferType.Default);
+        ballsBuffer.SetData(Field.Balls.Select(t =>
+        {
+            var position = t.position;
+            return new Vector3(position.x, position.y, position.z);
+        }).ToList());
+        Generator.SetBuffer(kernel, "ballsPositions", ballsBuffer);
+
+        Generator.SetFloat("ballRadius", Field.BallRadius);
+        Generator.SetFloat("minBound", min);
+        Generator.SetFloat("size", size);
+        
+        Generator.Dispatch(kernel, 4, 4, 4);
+
+        var outputData = new Output[maxVerticesCount];
+        outputBuffer.GetData(outputData);
+        
+        for (var i = 0; i < outputData.Length; i++)
+        {
+            if (outputData[i].hasValue != 1) 
+                continue;
+            
+            indices.Add(vertices.Count);
+            normals.Add(outputData[i].normal1);
+            vertices.Add(outputData[i].vertex1);
+                
+            indices.Add(vertices.Count);
+            normals.Add(outputData[i].normal2);
+            vertices.Add(outputData[i].vertex2);
+                
+            indices.Add(vertices.Count);
+            normals.Add(outputData[i].normal3);
+            vertices.Add(outputData[i].vertex3);
+        }
+        
+        outputBuffer.Dispose();
+        ballsBuffer.Dispose();
+    }
+
+    private void InitMeshDataCPU(float min, float max)
+    {
+        var size = (max - min) / CubesCount;
         var cubes = new List<Vector3[]>();
 
         for (var i = min; i < max; i += size)
@@ -63,13 +148,7 @@ public class MeshGenerator : MonoBehaviour
                 }
             }
         }
-
-        vertices.Clear();
-        indices.Clear();
-        normals.Clear();
         
-        Field.Update();
-
         foreach (var cube in cubes)
         {
             var mask = 0;
@@ -92,13 +171,13 @@ public class MeshGenerator : MonoBehaviour
                     caseToVertices[i].y,
                     caseToVertices[i].z
                 };
-                
+
                 for (var j = 0; j < 3; j++)
                 {
                     var edgeEndpoints = MarchingCubes.Tables._cubeEdges[edges[j]];
                     var first = cube[edgeEndpoints[0]];
                     var second = cube[edgeEndpoints[1]];
-                    
+
                     indices.Add(vertices.Count);
                     var intersectionFraction = Field.F(second) / (Field.F(second) - Field.F(first));
                     var vertex = intersectionFraction * first + (1 - intersectionFraction) * second;
@@ -113,15 +192,6 @@ public class MeshGenerator : MonoBehaviour
                 }
             }
         }
-
-        // Here unity automatically assumes that vertices are points and hence (x, y, z) will be represented as (x, y, z, 1) in homogenous coordinates
-        _mesh.Clear();
-        _mesh.SetVertices(vertices);
-        _mesh.SetTriangles(indices, 0);
-        _mesh.SetNormals(normals);
-
-        // Upload mesh data to the GPU
-        _mesh.UploadMeshData(false);
     }
 
     private Vector3[] CreateCube(float x, float y, float z, float size)

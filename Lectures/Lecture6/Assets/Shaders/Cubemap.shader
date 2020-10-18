@@ -101,7 +101,42 @@
                 float3 viewRefl = reflect(-viewDirection.xyz, normal);
                 float3 specular = SampleColor(viewRefl);
                 
-                return fixed4(specular, 1);
+                float3 result = float3(0, 0, 0);
+                float3 resultBRDF = float3(0, 0, 0);
+                int N = 10000;
+
+                // Actually, we can fairly calculate the tangent space to rotate w,
+                // but it affects the performance too much.
+                // So just sample points over all sphere and check if angle(w, normal) <= pi / 2 <=> cos >= 0
+//                float3 tmp = float3(1, 0, 0);
+//                if (abs(normal.x) > EPS)
+//                {
+//                    tmp = float3(0, 0, 1);
+//                }
+//                float3 tangent = normalize(cross(normal, tmp));
+//                float3 binormal = normalize(cross(normal, tangent));
+//                float3x3 wToNormal = float3x3(tangent, binormal, normal);
+
+                for (int i = 0; i < N; i++)
+                {
+                    float cosTheta = Random(i) * 2 - 1;
+                    float sinTheta = sqrt(1 - Sqr(cosTheta));
+                    float alpha = Random(N + i) * 2 * UNITY_PI;
+                    float3 w = float3(sinTheta * cos(alpha), sinTheta * sin(alpha), cosTheta);                   
+
+                    float dTheta = dot(normal, normalize(w));
+
+                    // why if (!...) continue; causes unity to crash?..
+                    if (dTheta >= 0)
+                    {
+                        float BRDF = GetSpecularBRDF(viewDirection, w, normal);
+                        resultBRDF += BRDF * dTheta;
+                        result += SampleColor(w) * BRDF * dTheta;
+                    }
+                }
+                result /= resultBRDF;
+                
+                return fixed4(result, 1);
             }
             ENDCG
         }
